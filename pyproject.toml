@@ -4,21 +4,25 @@ build-backend = "flit_core.buildapi"
 
 [project]
 name = "ogbench"
-version = "1.2.1"
-requires-python = ">=3.8"
+version = "0.1.0"
+requires-python = ">=3.12"
 dependencies = [
     "mujoco >= 3.1.6",
     "dm_control >= 1.0.20",
     "gymnasium[mujoco]",
 ]
 authors = [
-    { name = "Seohong Park" },
-    { name = "Kevin Frans" },
-    { name = "Benjamin Eysenbach" },
-    { name = "Sergey Levine" },
+    { name = "Sarthak Dayal" },
+    { name = "Abhinav Peri" },
+    { name = "Carl Qi" },
+    { name = "Claas Voelcker" },
+    { name = "Caleb Chuck" },
+    { name = "Alexander Levine" },
+    { name = "Amy Zhang" },
 ]
 maintainers = [
-    { name = "Seohong Park", email = "seohong@berkeley.edu" }
+    { name = "Sarthak Dayal", email = "sarthak@utexas.edu" },
+    { name = "Abhinav Peri", email = "app2452@utexas.edu" },
 ]
 license = { file = "LICENSE" }
 classifiers = ["License :: OSI Approved :: MIT License"]
@@ -42,10 +46,10 @@ all = [
 ]
 
 [project.urls]
-Home = "https://github.com/seohongpark/ogbench"
+Home = "https://github.com/Sarthak-Dayal/CARL"
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py312"
 line-length = 120
 
 [tool.ruff.format]

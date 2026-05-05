@@ -24,6 +24,11 @@ class HIQLAgent(flax.struct.PyTreeNode):
         weight = jnp.where(adv >= 0, expectile, (1 - expectile))
         return weight * (diff**2)
 
+    @staticmethod
+    def l2_normalize(x, eps=1e-6):
+        """Normalize vectors along the last dimension."""
+        return x * jax.lax.rsqrt((x * x).sum(axis=-1, keepdims=True) + eps)
+
     def value_loss(self, batch, grad_params):
         """Compute the IVL value loss.
 
@@ -123,6 +128,44 @@ class HIQLAgent(flax.struct.PyTreeNode):
             'std': jnp.mean(dist.scale_diag),
         }
 
+    def carl_loss(self, batch, grad_params):
+        """Compute the CARL contrastive loss between subgoal and action representations.
+
+        Uses ``carl_subgoals`` (state at t+k' for a per-example k' ~ U[1..subgoal_steps])
+        rather than ``low_actor_goals`` (always at t+subgoal_steps), so the contrastive
+        pair sees a uniform distribution of horizons. ``carl_actions`` is masked to the
+        same k' inside the dataset, keeping both halves on the same temporal interval.
+        """
+        sg_reps = self.network.select('goal_rep')(
+            jnp.concatenate([batch['observations'], batch['carl_subgoals']], axis=-1),
+            params=grad_params,
+        )
+        action_reps = self.network.select('carl_action_encoder')(batch['carl_actions'], params=grad_params)
+
+        sg_reps = self.l2_normalize(sg_reps)
+        action_reps = self.l2_normalize(action_reps)
+
+        sim_scores = jnp.matmul(sg_reps, action_reps.T) / self.config['carl_temperature']
+        positive_scores = jnp.diag(sim_scores)
+
+        forward_loss = -jnp.mean(positive_scores - jax.nn.logsumexp(sim_scores, axis=-1))
+        reverse_loss = -jnp.mean(positive_scores - jax.nn.logsumexp(sim_scores, axis=0))
+        carl_loss = forward_loss + reverse_loss
+
+        n_samples = sim_scores.shape[-1]
+        positive_similarity = positive_scores.mean() * self.config['carl_temperature']
+        negative_similarity = (
+            (sim_scores.sum() - positive_scores.sum()) / jnp.maximum(n_samples**2 - n_samples, 1)
+        ) * self.config['carl_temperature']
+
+        return carl_loss, {
+            'carl_loss': carl_loss,
+            'forward_loss': forward_loss,
+            'reverse_loss': reverse_loss,
+            'positive_similarity': positive_similarity,
+            'negative_similarity': negative_similarity,
+        }
+
     @jax.jit
     def total_loss(self, batch, grad_params, rng=None):
         """Compute the total loss."""
@@ -141,6 +184,12 @@ class HIQLAgent(flax.struct.PyTreeNode):
             info[f'high_actor/{k}'] = v
 
         loss = value_loss + low_actor_loss + high_actor_loss
+        if self.config['carl_weight'] > 0:
+            carl_loss, carl_info = self.carl_loss(batch, grad_params)
+            for k, v in carl_info.items():
+                info[f'carl/{k}'] = v
+            w = self.config['carl_weight']
+            loss = (1 - w) * loss + w * carl_loss
         return loss, info
 
     def target_update(self, network, module_name):
@@ -211,6 +260,7 @@ class HIQLAgent(flax.struct.PyTreeNode):
         rng, init_rng = jax.random.split(rng, 2)
 
         ex_goals = ex_observations
+        carl_action_horizon = int(config['subgoal_steps'])
         if config['discrete']:
             action_dim = ex_actions.max() + 1
         else:
@@ -302,6 +352,16 @@ class HIQLAgent(flax.struct.PyTreeNode):
             low_actor=(low_actor_def, (ex_observations, ex_goals)),
             high_actor=(high_actor_def, (ex_observations, ex_goals)),
         )
+        if config['carl_weight'] > 0:
+            carl_action_encoder_def = MLP(
+                hidden_dims=(*config['carl_encoder_hidden_dims'], config['rep_dim']),
+                activate_final=False,
+                layer_norm=config['layer_norm'],
+            )
+            stride = config['carl_action_stride']
+            n_action_steps = (carl_action_horizon + stride - 1) // stride
+            input_dim = n_action_steps if config['discrete'] else n_action_steps * action_dim
+            network_info['carl_action_encoder'] = (carl_action_encoder_def, (jnp.zeros((1, input_dim)),))
         networks = {k: v[0] for k, v in network_info.items()}
         network_args = {k: v[1] for k, v in network_info.items()}
 
@@ -333,6 +393,12 @@ def get_config():
             high_alpha=3.0,  # High-level AWR temperature.
             subgoal_steps=25,  # Subgoal steps.
             rep_dim=10,  # Goal representation dimension.
+            carl_weight=0.0,  # Weight on the CARL auxiliary loss.
+            carl_temperature=0.1,  # Temperature for the CARL contrastive loss.
+            carl_encoder_hidden_dims=(
+                256,
+                256,
+            ),  # Hidden dims for the CARL action MLP encoder (matches ogbench info_nce default).
             low_actor_rep_grad=False,  # Whether low-actor gradients flow to goal representation (use True for pixels).
             const_std=True,  # Whether to use constant standard deviation for the actors.
             discrete=False,  # Whether the action space is discrete.
@@ -350,6 +416,7 @@ def get_config():
             gc_negative=True,  # Whether to use '0 if s == g else -1' (True) or '1 if s == g else 0' (False) as reward.
             p_aug=0.0,  # Probability of applying image augmentation.
             frame_stack=ml_collections.config_dict.placeholder(int),  # Number of frames to stack.
+            carl_action_stride=1,  # Stride for CARL action sequences
         )
     )
     return config

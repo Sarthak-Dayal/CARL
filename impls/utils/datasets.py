@@ -318,6 +318,32 @@ class HGCDataset(GCDataset):
     - subgoal_steps: Subgoal steps (i.e., the number of steps to reach the low-level goal).
     """
 
+    def get_carl_actions(self, idxs, final_state_idxs, k_prime):
+        """Return zero-padded action sequences used by the CARL loss.
+
+        The output has fixed shape (B, ceil(subgoal_steps/stride) * action_dim) so the
+        downstream MLP encoder sees a consistent input size. For each example, action
+        positions whose offset is >= k_prime[i] (or that fall past the trajectory's
+        terminal) are zeroed out, so the contrastive action sequence covers exactly the
+        same temporal interval as the corresponding (s_t, s_{t+k_prime}) state pair.
+        """
+        horizon = int(self.config['subgoal_steps'])
+        stride = int(self.config['carl_action_stride'])
+        action_offsets = np.arange(0, horizon, stride)
+        action_idxs = idxs[:, None] + action_offsets[None, :]
+        terminal_mask = action_idxs < final_state_idxs[:, None]
+        length_mask = action_offsets[None, :] < k_prime[:, None]
+        valid_mask = terminal_mask & length_mask
+
+        clipped_action_idxs = np.minimum(action_idxs, self.size - 1)
+        action_sequences = np.asarray(self.dataset['actions'])[clipped_action_idxs]
+
+        if action_sequences.ndim > valid_mask.ndim:
+            valid_mask = valid_mask[..., None]
+        action_sequences = action_sequences * valid_mask.astype(action_sequences.dtype)
+
+        return action_sequences.reshape(len(idxs), -1).astype(np.float32)
+
     def sample(self, batch_size, idxs=None, evaluation=False):
         """Sample a batch of transitions with goals.
 
@@ -356,6 +382,14 @@ class HGCDataset(GCDataset):
         final_state_idxs = self.terminal_locs[np.searchsorted(self.terminal_locs, idxs)]
         low_goal_idxs = np.minimum(idxs + self.config['subgoal_steps'], final_state_idxs)
         batch['low_actor_goals'] = self.get_observations(low_goal_idxs)
+        if self.config.get('carl_weight', 0.0) > 0:
+            # Sample a per-example contrastive horizon k' ~ U[1..subgoal_steps] and use it
+            # for both the (s_t, s_{t+k'}) state pair and the action-sequence length so the
+            # two halves of the contrastive pair cover the same temporal interval.
+            k_prime = np.random.randint(1, int(self.config['subgoal_steps']) + 1, size=len(idxs))
+            carl_subgoal_idxs = np.minimum(idxs + k_prime, final_state_idxs)
+            batch['carl_subgoals'] = self.get_observations(carl_subgoal_idxs)
+            batch['carl_actions'] = self.get_carl_actions(idxs, final_state_idxs, k_prime)
 
         # Sample high-level actor goals and set prediction targets.
         # High-level future goals.
@@ -385,16 +419,16 @@ class HGCDataset(GCDataset):
 
         if self.config['p_aug'] is not None and not evaluation:
             if np.random.rand() < self.config['p_aug']:
-                self.augment(
-                    batch,
-                    [
-                        'observations',
-                        'next_observations',
-                        'value_goals',
-                        'low_actor_goals',
-                        'high_actor_goals',
-                        'high_actor_targets',
-                    ],
-                )
+                aug_keys = [
+                    'observations',
+                    'next_observations',
+                    'value_goals',
+                    'low_actor_goals',
+                    'high_actor_goals',
+                    'high_actor_targets',
+                ]
+                if self.config.get('carl_weight', 0.0) > 0:
+                    aug_keys.append('carl_subgoals')
+                self.augment(batch, aug_keys)
 
         return batch

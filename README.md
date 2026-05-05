@@ -1,4 +1,76 @@
 <div align="center">
+
+<h1>CARL: <b>C</b>ontrastive <b>A</b>ction-based <b>R</b>epresentations for Reusable <b>L</b>ocal Control</h1>
+
+<img width="1280" height="357" alt="Method Figure" src="https://github.com/user-attachments/assets/22ec5f3b-0cde-47fe-99b5-56aa7848fb6c" />
+
+
+</div>
+
+
+
+
+# Overview
+
+Hierarchical Reinforcement Learning (HRL) promises to solve long-horizon Reinforcement Learning (RL) tasks more efficiently than non-hierarchical counterparts by discovering and reusing temporally-extended skills. However, obtaining skills that are actually reusable remains an open challenge. Towards this end, we focus on abstractions that exploit the intuition of local dynamics: local transitions in different global contexts require similar kinds of action sequences. By aligning these contexts with the action sequences they require, we are able to learn which skills to reuse and where to reuse them. In principle, this information should benefit many HRL algorithms, where high-level policies have to reason about the low-level skills they use. The resulting algorithm CARL (**C**ontrastive **A**ction-based **R**epresentations for Reusable **L**ocal Control) shows both qualitative clustering of meaningful skills in complex humanoid environments and improved downstream performance on the OGBench benchmark when integrated with HIQL. We visualize additional results and video rollouts on our [accompanying website](https://sites.google.com/view/behavior-rep/home).
+
+This codebase is a **fork of [OGBench](https://github.com/seohongpark/ogbench)** ([paper](https://arxiv.org/abs/2410.20092), [project page](https://seohong.me/projects/ogbench/)). We reuse OGBench's environments, datasets, and reference implementations, and add CARL as an auxiliary contrastive objective layered on top of the existing HIQL implementation. The original OGBench documentation is preserved [below](#ogbench-upstream-readme) for reference.
+
+# Running CARL
+
+CARL is implemented as an auxiliary loss inside the HIQL agent at `impls/agents/hiql.py` (see `carl_loss` and the `carl_*` config keys), with the contrastive batches assembled in `impls/utils/datasets.py`. CARL is enabled whenever `--agent.carl_weight > 0` is passed to the standard HIQL training script; setting it to `0` (the default) recovers vanilla HIQL.
+
+### Installation
+
+We use [`uv`](https://docs.astral.sh/uv/) to manage the Python environment. From the repo root:
+
+```shell
+# Create and populate the virtual environment from uv.lock.
+uv sync --extra train
+```
+
+The `train` extra installs JAX (with CUDA), Flax, distrax, wandb, and the rest of the reference-implementation dependencies on top of the base OGBench package. Use `--extra all` if you also want the `dev` tools (e.g. `ruff`). The resulting venv lives at `.venv/` and is what `impls/run_hyperparams.sh` activates by default.
+
+Activate it manually with `source .venv/bin/activate`, or prefix individual commands with `uv run`.
+
+### Training HIQL+CARL
+
+The simplest way to reproduce a HIQL+CARL run on a given environment is via `run_hyperparams.sh`, which looks up the exact command we use in `impls/hyperparameters.sh`:
+
+```shell
+cd impls
+# Train HIQL+CARL on antmaze-large-navigate-v0 using our tuned hyperparameters.
+./run_hyperparams.sh antmaze-large-navigate-v0 HIQL+CARL
+```
+
+Equivalently, you can call `main.py` directly. The command below matches the entry under `# antmaze-large-navigate-v0 (HIQL+CARL)` in `hyperparameters.sh`:
+
+```shell
+uv run python main.py \
+    --env_name=antmaze-large-navigate-v0 \
+    --agent=agents/hiql.py \
+    --agent.high_alpha=3.0 --agent.low_alpha=3.0 \
+    --agent.subgoal_steps=25 --agent.rep_dim=100 \
+    --agent.carl_weight=0.3 --agent.carl_temperature=0.1 --agent.carl_action_stride=1
+```
+
+The CARL-specific flags are:
+
+- `--agent.carl_weight`: weight on the CARL contrastive auxiliary loss. **CARL is only active when this is `> 0`** — at `0` (the default), the CARL branch is skipped entirely and training reduces to standard HIQL, regardless of the other `carl_*` flags.
+- `--agent.carl_temperature`: temperature for the InfoNCE-style contrastive loss between subgoal and action-sequence representations.
+- `--agent.carl_action_stride`: stride used when sub-sampling the action sequence fed to the CARL action encoder.
+- `--agent.carl_encoder_hidden_dims`: hidden dims of the CARL action MLP encoder (defaults to `(256, 256)`).
+- `--agent.subgoal_steps` and `--agent.rep_dim`: shared with HIQL but tuned for CARL (we use `25` and `100` across our runs).
+
+For per-environment commands (HIQL, HIQL+CARL, and the OGBench baselines), see `impls/hyperparameters.sh` — every block has a matching `# <env> (HIQL+CARL)` entry. Training metrics, evaluations, and rollout videos are logged to Weights & Biases by default; on a headless machine, set `MUJOCO_GL=egl` so MuJoCo can render without a display. If you have multiple GPUs and want to run several seeds in parallel (e.g. via a wandb sweep), `impls/run_parallel.sh` is a small helper that launches one copy of a command per visible GPU.
+
+---
+
+# OGBench (upstream README)
+
+> The remainder of this README is the original OGBench documentation. CARL builds on top of this benchmark; everything below describes the upstream code and conventions.
+
+<div align="center">
 <img src="assets/ogbench.svg" width="300px"/>
 
 <div id="user-content-toc">
